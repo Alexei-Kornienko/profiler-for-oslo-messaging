@@ -11,25 +11,28 @@ import threading
 import eventlet
 from oslo.config import cfg
 from oslo import messaging
+from oslo.messaging.notify import notifier
 
 
 LOG = logging.getLogger(__name__)
 
 TOTAL_BANDWIDTH = 0
+TRANSPORT = None 
 
+CLIENTS = 1
+MESSAGES_PER_CLIENT = 1000000
 
 class TestClient(threading.Thread):
 
     def __init__(self, num_calls, *args, **kwargs):
         super(TestClient, self).__init__(*args, **kwargs)
         self._num_calls = num_calls
-        self.transport = messaging.get_transport(cfg.CONF, 'rabbit://guest:guest@localhost:5672/')
         target = messaging.Target(topic='testtopic', version='1.0')
-        self._client = messaging.RPCClient(self.transport, target)
+        self._client = messaging.RPCClient(TRANSPORT, target)
 
     def run(self):
         global TOTAL_BANDWIDTH
-        for i in range(self._num_calls):
+        for i in xrange(self._num_calls):
             self._client.cast({}, 'test', arg=self.name)
             TOTAL_BANDWIDTH += 1
 
@@ -47,6 +50,13 @@ class TestEndpoint(object):
         if len(self.buffer) >= self.buffer_size:
             self.flush()
 
+    def error(self, ctxt, publisher_id, event_type, payload, metadata):
+        global TOTAL_BANDWIDTH
+        TOTAL_BANDWIDTH += 1
+        self.buffer.append(publisher_id)
+        if len(self.buffer) >= self.buffer_size:
+            self.flush()
+
     def flush(self):
         LOG.info('Received %s messages' % len(self.buffer))
         self.buffer = []
@@ -54,8 +64,6 @@ class TestEndpoint(object):
 
 def client():
     eventlet.monkey_patch()
-    CLIENTS = 5
-    MESSAGES_PER_CLIENT = 1000000
     workers = []
     for i in range(CLIENTS):
         t = TestClient(MESSAGES_PER_CLIENT)
@@ -67,13 +75,45 @@ def client():
 def server():
     eventlet.monkey_patch()
 
-    transport = messaging.get_transport(cfg.CONF, 'rabbit://guest:guest@localhost:5672/')
     target = messaging.Target(topic='testtopic', server='server1', version='1.0')
-    server = messaging.get_rpc_server(transport, target, [TestEndpoint()],
+    server = messaging.get_rpc_server(TRANSPORT, target, [TestEndpoint()],
                                       executor='eventlet')
     server.start()
     server.wait()
 
+
+class NotifyClient(threading.Thread):
+
+    def __init__(self, num_calls, *args, **kwargs):
+        super(NotifyClient, self).__init__(*args, **kwargs)
+        self._num_calls = num_calls
+        self.notifier = notifier.Notifier(TRANSPORT, 'test.client', driver='messaging', topic='notifications')
+
+    def run(self):
+        global TOTAL_BANDWIDTH
+        for i in xrange(self._num_calls):
+            self.notifier.error({'context':'foobar'}, 'test-notification', {'some': 'useful payload'})
+            TOTAL_BANDWIDTH += 1
+
+def notifier_client():
+    eventlet.monkey_patch()
+    workers = []
+    for i in range(CLIENTS):
+        t = NotifyClient(MESSAGES_PER_CLIENT)
+        t.start()
+        workers.append(t)
+    for w in workers:
+        w.join()
+
+
+def notify_listener():
+    eventlet.monkey_patch()
+
+    target = messaging.Target(topic='notifications', server='server1', version='1.0')
+    server = messaging.get_notification_listener(TRANSPORT, [target], [TestEndpoint()], executor='eventlet')
+    #server = messaging.get_notification_listener(TRANSPORT, [target], [TestEndpoint()], executor='blocking')
+    server.start()
+    server.wait()
 
 @contextmanager
 def profiler(name):
@@ -84,27 +124,37 @@ def profiler(name):
 
     profiler.disable()
     timestamp = datetime.now().strftime('%d%m_%H:%M:%S')
-    profiler.dump_stats('%s-%s.pstats' % name, timestamp)
+    profiler.dump_stats('%s-%s.pstats' % (name, timestamp))
 
 
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout,level=logging.WARNING)
+    
+    TRANSPORT = messaging.get_transport(cfg.CONF, 'zmq://localhost/')
+    #TRANSPORT = messaging.get_transport(cfg.CONF, 'rabbit://localhost/')
+
     argv = sys.argv[1:]
     start_server = '-s' in argv
     profiler_enabled = '-p' in argv
+    notifier_test = '-n' in argv
 
-    #cfg.CONF(argv, project='test')
-    service = server if start_server else client
+    if notifier_test:
+        service = notify_listener if start_server else notifier_client
+    else:
+        service = server if start_server else client
 
     start = time.time()
-    try:
-        if profiler_enabled:
-            with profiler(service.__name__):
+    if profiler_enabled:
+        with profiler(service.__name__):
+            try:
                 service()
-        else:
+            except KeyboardInterrupt:
+                pass  # gracefully exit
+    else:
+        try:
             service()
-    except KeyboardInterrupt:
-        pass  # gracefully exit
+        except KeyboardInterrupt:
+            pass  # gracefully exit
     run_time = time.time() - start
     bandwidth = TOTAL_BANDWIDTH / run_time
     LOG.warn('Run time: %s' % run_time)
