@@ -33,7 +33,8 @@ class TestClient(threading.Thread):
     def run(self):
         global TOTAL_BANDWIDTH
         for i in xrange(self._num_calls):
-            self._client.cast({}, 'test', arg=self.name)
+            #self._client.cast({'context':'foo'}, 'test', arg=self.name)
+            result = self._client.call({}, 'test', arg=self.name)
             TOTAL_BANDWIDTH += 1
 
 
@@ -49,6 +50,7 @@ class TestEndpoint(object):
         self.buffer.append(arg)
         if len(self.buffer) >= self.buffer_size:
             self.flush()
+        return 'BAM'
 
     def error(self, ctxt, publisher_id, event_type, payload, metadata):
         global TOTAL_BANDWIDTH
@@ -77,7 +79,7 @@ def server():
 
     target = messaging.Target(topic='testtopic', server='server1', version='1.0')
     server = messaging.get_rpc_server(TRANSPORT, target, [TestEndpoint()],
-                                      executor='eventlet')
+                                      executor='blocking')
     server.start()
     server.wait()
 
