@@ -26,6 +26,7 @@ class TestClient(threading.Thread):
 
     def __init__(self, num_calls, *args, **kwargs):
         super(TestClient, self).__init__(*args, **kwargs)
+        self.daemon = True
         self._num_calls = num_calls
         target = messaging.Target(topic='testtopic', version='1.0')
         self._client = messaging.RPCClient(TRANSPORT, target)
@@ -34,7 +35,9 @@ class TestClient(threading.Thread):
         global TOTAL_BANDWIDTH
         for i in xrange(self._num_calls):
             #self._client.cast({'context':'foo'}, 'test', arg=self.name)
-            result = self._client.call({}, 'test', arg=self.name)
+            msg_in = TOTAL_BANDWIDTH
+            result = self._client.call({}, 'test', arg=msg_in)
+            assert result == msg_in
             TOTAL_BANDWIDTH += 1
 
 
@@ -50,7 +53,7 @@ class TestEndpoint(object):
         self.buffer.append(arg)
         if len(self.buffer) >= self.buffer_size:
             self.flush()
-        return 'BAM'
+        return arg
 
     def error(self, ctxt, publisher_id, event_type, payload, metadata):
         global TOTAL_BANDWIDTH
@@ -65,17 +68,18 @@ class TestEndpoint(object):
 
 
 def client():
-    eventlet.monkey_patch()
+    #eventlet.monkey_patch()
     workers = []
     for i in range(CLIENTS):
         t = TestClient(MESSAGES_PER_CLIENT)
-        t.start()
-        workers.append(t)
-    for w in workers:
-        w.join()
+        t.run()
+        #t.start()
+        #workers.append(t)
+    while True:
+        time.sleep(10)
 
 def server():
-    eventlet.monkey_patch()
+    #eventlet.monkey_patch()
 
     target = messaging.Target(topic='testtopic', server='server1', version='1.0')
     server = messaging.get_rpc_server(TRANSPORT, target, [TestEndpoint()],
@@ -102,10 +106,12 @@ def notifier_client():
     workers = []
     for i in range(CLIENTS):
         t = NotifyClient(MESSAGES_PER_CLIENT)
-        t.start()
+        #t.start()
+        t.run()
+        return
         workers.append(t)
-    for w in workers:
-        w.join()
+    while True:
+        time.sleep(10)
 
 
 def notify_listener():
@@ -151,13 +157,14 @@ if __name__ == '__main__':
             try:
                 service()
             except KeyboardInterrupt:
-                pass  # gracefully exit
+                print('EXIT') # gracefully exit
     else:
         try:
             service()
         except KeyboardInterrupt:
-            pass  # gracefully exit
+            print('EXIT') # gracefully exit
     run_time = time.time() - start
     bandwidth = TOTAL_BANDWIDTH / run_time
     LOG.warn('Run time: %s' % run_time)
     LOG.warn('Total bandwidth: %s m/s' % bandwidth)
+    sys.exit(0)
